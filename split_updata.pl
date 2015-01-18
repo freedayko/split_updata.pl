@@ -17,6 +17,10 @@
 #   By            : ZeBadger (z e b a d g e r @ h o t m a i l . c o m)
 #   Comment       : Added CRC checking
 #
+#   Last Modified : Wed 18 January 2015
+#   By            : FreeDayKo (f r e e d a y k o @ g i t h u b . c o m)
+#   Comment       : Update for new firmware type
+#
 ######################################################################
  
 use strict;
@@ -24,37 +28,6 @@ use warnings;
 
 my $CRC_CHECK= -e "crc" && -x _;
  
-my %fileHash=(	"\x00\x00\x00\x10","appsboot.mbn",
-		"\x00\x00\x00\x20","file25.mbn",
-		"\x00\x00\x00\x30","boot.img",
-		"\x00\x00\x00\x40","system.img",
-		"\x00\x00\x00\x50","userdata.img",
-		"\x00\x00\x00\x60","recovery.img",
-		"\x00\x00\x00\xB0","FactoryImage.img",
-		"\x00\x00\x00\xC0","file11.mbn",
-		"\x00\x00\x00\xD0","amss.mbn",
-		"\x00\x00\x00\xE0","oemsbl.mbn",
-		"\x00\x00\x00\xF0","file04.mbn", #oemsblhd.mbn?
-		"\x00\x00\x00\xF1","file07.mbn",
-		"\x00\x00\x00\xF2","splash.raw565",
-		"\x00\x00\x00\xF3","file01.mbn",
-		"\x00\x00\x00\xF4","file02.mbn",
-		"\x00\x00\x00\xF5","file14.mbn",
-		"\x00\x00\x00\xF6","boot_versions.txt",
-		"\x00\x00\x00\xF7","upgradable_versions.txt",
-		"\x00\x00\x00\xF8","file09.mbn",
-		"\x00\x00\x00\xF9","version.txt",
-		"\x00\x00\x00\xFA","file20.mbn",
-		"\x00\x00\x00\xFB","appsboothd.mbn",
-		"\x00\x00\x00\xFC","file23.mbn",
-		"\x00\x00\x00\xFD","file16.mbn",
-		"\x00\x00\x00\xFE","file18.mbn",
-		"\x00\x00\x00\xFF","file21.mbn",
-		"\x00\x00\x10\xF6","file22.txt",
-	);
-
-my $unknown_count=0;
-
 # Turn on print flushing.
 $|++;
  
@@ -62,19 +35,13 @@ $|++;
 use constant UINT_SIZE => 4;
  
 # If a filename wasn't specified on the commmand line then
-# assume the file to be unpacked is under current directory. 
+# assume the file to be unpacked is called "UPDATA.APP". 
 my $FILENAME = undef;
-if (@ARGV) {
-	$FILENAME = $ARGV[0];
+if ($#ARGV == -1) {
+	$FILENAME = "UPDATA.APP";
 }
 else {
-	my @files = `ls`;
 	$FILENAME = $ARGV[0];
-	foreach (@files){
-		if(/updata.app/i){
-			$FILENAME=$_;
-		}
-	}
 }
  
 open(INFILE, $FILENAME) or die "Cannot open $FILENAME: $!\n";
@@ -91,7 +58,6 @@ mkdir $BASEPATH;
 while (!eof(INFILE))
 {
 	$fileLoc=&find_next_file($fileLoc);
-	#printf "fileLoc=%x\n",$fileLoc;
 	seek(INFILE, $fileLoc, 0);
 	$fileLoc=&dump_file();
 }
@@ -128,29 +94,21 @@ sub dump_file {
     # Verify the identifier matches.
     read(INFILE, $buffer, UINT_SIZE); # Packet Identifier
     unless ($buffer eq "\x55\xAA\x5A\xA5") { die "Unrecognised file format. Wrong identifier.\n"; }
-    read(INFILE, $buffer, UINT_SIZE); # Packet Length.
+    read(INFILE, $buffer, UINT_SIZE); # Packet Length. Little endian 32bit long
     my ($headerLength) = unpack("V", $buffer);
-    read(INFILE, $buffer, 4);         # Always 1
+    read(INFILE, $buffer, UINT_SIZE); # Always 1
     read(INFILE, $buffer, 8);         # Hardware ID
-    read(INFILE, $fileSeq, 4);        # File Sequence
-	#my ($temp)=unpack("V",$fileSeq);
-	#print "fileSeq=$temp\n";
-    if (exists($fileHash{$fileSeq})) {
-	$outfilename=$fileHash{$fileSeq};
-    } else {
-	$outfilename="unknown_file.$unknown_count";
-	$unknown_count++;
-    }
-    
+    read(INFILE, $buffer, UINT_SIZE); # ??? ex FILE SEQ
     read(INFILE, $buffer, UINT_SIZE); # Data file length
     my ($dataLength) = unpack("V", $buffer);
     read(INFILE, $buffer, 16);        # File date
     read(INFILE, $buffer, 16);        # File time
-    read(INFILE, $buffer, 16);        # The word INPUT ?
-    read(INFILE, $buffer, 16);        # Blank
-    read(INFILE, $buffer, 2);         # Checksum of the header maybe?
-    read(INFILE, $buffer, 2);         # Always 1?
-    read(INFILE, $buffer, 2);         # Blank
+    read(INFILE, $fileSeq,  32);# File NAME
+    $outfilename = unpack("A32", $fileSeq);
+
+#   
+    read(INFILE, $buffer,  2);
+    read(INFILE, $buffer,  UINT_SIZE);
 
     # Grab the checksum of the file
     read(INFILE, $fileChecksum, $headerLength-98);
@@ -179,6 +137,16 @@ sub dump_file {
 	}
     }
     
+	$buffer = substr($buffer, 0, 4);
+	if ($buffer eq "\x3A\xFF\x26\xED") { # Ext4 Sparce
+	    `simg2img $BASEPATH$outfilename $BASEPATH\L$outfilename.img`;
+	    unlink "$BASEPATH$outfilename";
+	} elsif ($buffer eq "\xEB\x3C\x90\x4D") { # Fat16
+	    rename "$BASEPATH$outfilename", "$BASEPATH\L$outfilename.img";
+	} elsif ($buffer eq "\x41\x4E\x44\x52") { # Android recovery?
+	    rename "$BASEPATH$outfilename", "$BASEPATH\L$outfilename.img";
+	}
+	
     # Ensure we finish on a 4 byte boundary alignment.
     my $remainder = UINT_SIZE - (tell(INFILE) % UINT_SIZE);
     if ($remainder < UINT_SIZE) {
@@ -244,4 +212,3 @@ sub slimhexdump ()
 
 	return ($ret_str);
 }
-        
